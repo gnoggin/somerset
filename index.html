@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Somerset Song Vote</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    :root{
+      --brand:#ffd54f; /* warm yellow */
+      --brand-2:#ffb300; /* deeper amber */
+      --ink:#2d2a26; /* readable brown/black */
+      --paper:#fffaf0; /* linen-ish */
+      --ok:#2e7d32;
+      --muted:#6b625a;
+      --card:#fffdf6;
+    }
+    html,body{height:100%}
+    body{
+      margin:0; font:16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
+      color:var(--ink); background:linear-gradient(180deg,var(--paper),#fff) fixed;
+    }
+    .wrap{max-width:880px; margin-inline:auto; padding:24px;}
+    header{
+      background: linear-gradient(135deg,var(--brand),var(--brand-2));
+      color:#1b160f; border-bottom:3px solid #e6a800;
+      position:sticky; top:0; z-index:10;
+    }
+    .bar{max-width:880px; margin:auto; padding:18px 24px; display:flex; gap:16px; align-items:center;}
+    .badge{background: rgba(255,255,255,.55); padding:4px 10px; border-radius:999px; font-weight:600}
+    h1{font-size:1.4rem; margin:0}
+    .grid{display:grid; grid-template-columns:1fr; gap:14px;}
+    @media (min-width:720px){ .grid{grid-template-columns:1fr 1fr 1fr;} }
+    .card{
+      background:var(--card); border:1px solid #f2e2b3; border-radius:16px; padding:16px; box-shadow:0 6px 16px rgba(0,0,0,.06);
+      display:flex; flex-direction:column; gap:10px;
+    }
+    .title{font-weight:700}
+    audio{ width:100%; }
+    .voteRow{ display:flex; gap:10px; align-items:center; }
+    button.vote{
+      appearance:none; border:0; cursor:pointer; border-radius:999px;
+      padding:10px 14px; background:var(--brand-2); color:#231b12; font-weight:700;
+      box-shadow:0 2px 0 #d18e00; transition:transform .05s ease;
+    }
+    button.vote:active{ transform: translateY(1px); box-shadow:0 1px 0 #d18e00; }
+    .count{ font-variant-numeric: tabular-nums; color:var(--muted)}
+    .totals{ margin-top:18px; background:#fff7da; border:1px dashed #f0cd6e; border-radius:12px; padding:12px; }
+    .meter{height:10px; background:#f2e2b3; border-radius:999px; overflow:hidden}
+    .meter > div{height:100%; background:linear-gradient(90deg,var(--brand-2),#ffd54f)}
+    footer{margin:40px 0 12px; color:var(--muted); font-size:.9rem}
+    .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="bar" role="banner">
+      <div class="badge" aria-hidden="true">Somerset</div>
+      <h1>Pick our Street Jam</h1>
+    </div>
+  </header>
+
+  <main class="wrap" id="app">
+    <p>Have a listen and tap the big yellow button for the one you like. Vote as many times as your enthusiasm requires — we’re not the Oscars. Results update live.</p>
+
+    <section id="cards" class="grid" aria-live="polite"></section>
+
+    <section class="totals" aria-describedby="totals-caption">
+      <div id="totals-caption" class="sr-only">Live tally of votes by song</div>
+      <div id="totals"></div>
+    </section>
+
+    <footer>Hosting on GitHub Pages • Votes via Supabase • Made with ☀️ for neighbors</footer>
+  </main>
+
+<script>
+  // ====== CONFIG (edit these two bits if needed) ======
+  const SUPABASE_URL = "https://odvbdtuslxbpfiatvfby.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9kdmJkdHVzbHhicGZpYXR2ZmJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUyODE3MDMsImV4cCI6MjA3MDg1NzcwM30.WzRloK5FBlGWA2YsawrquNOA0AOwsq3OQQdm7JvYusI";
+
+  // Playlist: put audio files inside `/audio/` in your repo. Relative paths work on GitHub Pages.
+  // If you prefer, you can set absolute URLs (e.g., jsDelivr) per item.
+  const PLAYLIST = [
+    { id: "track1", title: "Track One", src: "audio/track1.mp3" },
+    { id: "track2", title: "Track Two", src: "audio/track2.mp3" },
+    { id: "track3", title: "Track Three", src: "audio/track3.mp3" },
+  ];
+
+  // ====== APP ======
+  let supabaseClient;
+  const state = { counts: new Map(), total: 0 };
+
+  function $(sel){ return document.querySelector(sel) }
+  function el(tag, attrs={}, children=[]) {
+    const n = document.createElement(tag);
+    Object.entries(attrs).forEach(([k,v])=>{
+      if(k.startsWith('on') && typeof v === 'function') n.addEventListener(k.slice(2), v);
+      else if(k === 'class') n.className = v;
+      else if(k === 'html') n.innerHTML = v;
+      else n.setAttribute(k, v);
+    });
+    children.forEach(c => n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+    return n;
+  }
+
+  function renderCards() {
+    const frag = document.createDocumentFragment();
+    for (const s of PLAYLIST) {
+      const audio = el('audio', { controls: '', preload: 'none', src: s.src });
+      const btn = el('button', { class: 'vote', onClick: () => vote(s.id), 'aria-label': `Vote for ${s.title}` }, ['Vote']);
+      const count = el('span', { class: 'count', id: `count-${s.id}` }, ['…']);
+      const card = el('article', { class: 'card', 'aria-labelledby': `h-${s.id}` }, [
+        el('div', { class: 'title', id: `h-${s.id}` }, [s.title]),
+        audio,
+        el('div', { class: 'voteRow' }, [btn, count])
+      ]);
+      frag.appendChild(card);
+    }
+    $('#cards').innerHTML = '';
+    $('#cards').appendChild(frag);
+  }
+
+  function renderTotals() {
+    const container = $('#totals');
+    container.innerHTML = '';
+    const totalVotes = Array.from(state.counts.values()).reduce((a,b)=>a+b,0);
+
+    for (const s of PLAYLIST) {
+      const n = state.counts.get(s.id) || 0;
+      const pct = totalVotes ? Math.round((n/totalVotes)*100) : 0;
+      const row = el('div', { style: 'margin:8px 0' }, [
+        el('div', { style: 'display:flex; justify-content:space-between' }, [
+          el('strong', {}, [s.title]),
+          el('span', {}, [`${n} vote${n!==1?'s':''} (${pct}%)`])
+        ]),
+        (()=>{
+          const m = el('div', { class: 'meter', role: 'img', 'aria-label': `${s.title} ${pct}%` }, [
+            el('div', { style: `width:${pct}%` })
+          ]);
+          return m;
+        })()
+      ]);
+      container.appendChild(row);
+    }
+  }
+
+  function updateCountsUI(){
+    for (const s of PLAYLIST) {
+      const n = state.counts.get(s.id) || 0;
+      const elCount = document.getElementById(`count-${s.id}`);
+      if (elCount) elCount.textContent = `${n} vote${n!==1?'s':''}`;
+    }
+    renderTotals();
+  }
+
+  async function initSupabase(){
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // Initial aggregate
+    await fetchCounts();
+
+    // Live updates
+    supabaseClient
+      .channel('votes-live')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'votes' }, payload => {
+        const sid = payload.new.song_id;
+        state.counts.set(sid, (state.counts.get(sid) || 0) + 1);
+        updateCountsUI();
+      })
+      .subscribe();
+  }
+
+  async function fetchCounts(){
+    const { data, error } = await supabaseClient
+      .from('votes')
+      .select('song_id', { count: 'exact', head: false })
+      .then(({ data, error }) => {
+        if (error) throw error; return { data };
+      })
+      .catch(err => { console.error(err); return { data: [] }; });
+
+    // Build counts map
+    state.counts = new Map(PLAYLIST.map(s => [s.id, 0]));
+    for (const row of (data||[])) {
+      state.counts.set(row.song_id, (state.counts.get(row.song_id)||0) + 1);
+    }
+    updateCountsUI();
+  }
+
+  async function vote(songId){
+    try {
+      const { error } = await supabaseClient.from('votes').insert({ song_id: songId });
+      if (error) throw error;
+      // Optimistic UI: bump immediately. Real-time will also confirm.
+      state.counts.set(songId, (state.counts.get(songId) || 0) + 1);
+      updateCountsUI();
+    } catch (e) {
+      alert('Could not record vote. Please try again.');
+      console.error(e);
+    }
+  }
+
+  // Boot
+  renderCards();
+  initSupabase();
+</script>
+</body>
+</html>
