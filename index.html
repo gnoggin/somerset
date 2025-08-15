@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Somerset Song Vote</title>
+  <!--
+    How to use this file
+    1) Save as index.html at repo root (gnoggin/somerset)
+    2) Put your audio files in /audio/ with names below OR edit PLAYLIST
+    3) Run the SQL in Supabase to create the votes table & RLS (see comments near bottom)
+    4) No Realtime needed — this version uses polling every few seconds
+  -->
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    :root{
+      --brand:#ffd54f; /* warm yellow */
+      --brand-2:#ffb300; /* deeper amber */
+      --ink:#2d2a26;    /* readable brown/black */
+      --paper:#fffaf0;  /* linen-ish */
+      --ok:#2e7d32;
+      --danger:#b00020;
+      --muted:#6b625a;
+      --card:#fffdf6;
+    }
+    html,body{height:100%}
+    body{ margin:0; font:18px/1.5 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans"; color:var(--ink); background:linear-gradient(180deg,var(--paper),#fff) fixed; }
+    .wrap{max-width:920px; margin-inline:auto; padding:24px;}
+    header{ background: linear-gradient(135deg,var(--brand),var(--brand-2)); color:#1b160f; border-bottom:3px solid #e6a800; position:sticky; top:0; z-index:10; }
+    .bar{max-width:920px; margin:auto; padding:18px 24px; display:flex; gap:16px; align-items:center;}
+    .badge{background: rgba(255,255,255,.55); padding:6px 12px; border-radius:999px; font-weight:700; letter-spacing:.2px}
+    h1{font-size:1.6rem; margin:0}
+    .lead{font-size:1.05rem}
+    .grid{display:grid; grid-template-columns:1fr; gap:16px;}
+    @media (min-width:760px){ .grid{grid-template-columns:1fr 1fr 1fr;} }
+    .card{ background:var(--card); border:1px solid #f2e2b3; border-radius:16px; padding:16px; box-shadow:0 6px 18px rgba(0,0,0,.06); display:flex; flex-direction:column; gap:12px; }
+    .title{font-weight:800; letter-spacing:.2px}
+    audio{ width:100%; }
+    .voteRow{ display:flex; gap:12px; align-items:center; flex-wrap:wrap }
+    button.vote{ appearance:none; border:0; cursor:pointer; border-radius:999px; padding:12px 18px; background:var(--brand-2); color:#231b12; font-weight:800; font-size:1rem; box-shadow:0 2px 0 #d18e00; transition:transform .05s ease; }
+    button.vote:active{ transform: translateY(1px); box-shadow:0 1px 0 #d18e00; }
+    .count{ font-variant-numeric: tabular-nums; color:var(--muted); font-weight:600 }
+    .totals{ margin-top:18px; background:#fff7da; border:1px dashed #f0cd6e; border-radius:12px; padding:12px; }
+    .meter{height:12px; background:#f2e2b3; border-radius:999px; overflow:hidden}
+    .meter > div{height:100%; background:linear-gradient(90deg,var(--brand-2),#ffd54f)}
+    footer{margin:32px 0 12px; color:var(--muted); font-size:.95rem}
+    .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    .banner{display:none; margin:12px 0; padding:10px 12px; border-radius:10px; background:#fff1f1; border:1px solid #ffd6d6; color:var(--danger);}
+    .banner.show{display:block}
+    .toolbar{display:flex; justify-content:space-between; align-items:center; gap:12px; margin:10px 0 0}
+    .muted{color:var(--muted)}
+    .pill{background:#ffe082; padding:4px 10px; border-radius:999px; font-weight:700}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="bar" role="banner">
+      <div class="badge" aria-hidden="true">Somerset</div>
+      <h1>Pick our Street Jam</h1>
+    </div>
+  </header>
+
+  <main class="wrap" id="app">
+    <p class="lead">Have a listen and tap the big yellow button for the one you like. Vote as many times as your enthusiasm requires — results update automatically every few seconds.</p>
+
+    <div id="errorBanner" class="banner" role="alert"></div>
+
+    <section id="cards" class="grid" aria-live="polite"></section>
+
+    <div class="toolbar">
+      <div class="muted">Tally auto-refreshes <span class="pill" id="refreshLabel">every 8s</span></div>
+      <button id="btnRefresh" class="vote" style="padding:8px 12px;font-weight:700">Refresh now</button>
+    </div>
+
+    <section class="totals" aria-describedby="totals-caption">
+      <div id="totals-caption" class="sr-only">Live tally of votes by song</div>
+      <div id="totals"></div>
+    </section>
+
+    <footer>Hosting on GitHub Pages • Votes via Supabase • Made with ☀️ for neighbors</footer>
+  </main>
+
+<script>
+  // ====== CONFIG ======
+  const SUPABASE_URL = "https://odvbdtuslxbpfiatvfby.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9kdmJkdHVzbHhicGZpYXR2ZmJ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUyODE3MDMsImV4cCI6MjA3MDg1NzcwM30.WzRloK5FBlGWA2YsawrquNOA0AOwsq3OQQdm7JvYusI";
+
+  // Prefer your repo relative paths. A CDN mirror is provided as a fallback.
+  const CDN_BASE = "https://cdn.jsdelivr.net/gh/gnoggin/somerset@main/";
+
+  // Update titles/filenames if yours differ. Keep them in /audio/.
+  const PLAYLIST = [
+    { id: "track1", title: "Track One", sources: ["audio/track1.mp3", CDN_BASE+"audio/track1.mp3"] },
+    { id: "track2", title: "Track Two", sources: ["audio/track2.mp3", CDN_BASE+"audio/track2.mp3"] },
+    { id: "track3", title: "Track Three", sources: ["audio/track3.mp3", CDN_BASE+"audio/track3.mp3"] },
+  ];
+
+  const POLL_INTERVAL_MS = 8000; // change to taste
+
+  // ====== STATE & HELPERS ======
+  let supabaseClient;
+  const state = { counts: new Map(PLAYLIST.map(s=>[s.id,0])), timer:null };
+
+  const $ = sel => document.querySelector(sel);
+  function el(tag, attrs={}, children=[]) {
+    const n = document.createElement(tag);
+    Object.entries(attrs).forEach(([k,v])=>{
+      if(k.startsWith('on') && typeof v === 'function') n.addEventListener(k.slice(2), v);
+      else if(k === 'class') n.className = v;
+      else if(k === 'html') n.innerHTML = v;
+      else n.setAttribute(k, v);
+    });
+    children.forEach(c => n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+    return n;
+  }
+
+  function showError(msg){
+    const b = $('#errorBanner');
+    b.textContent = msg; b.classList.add('show');
+  }
+  function clearError(){
+    const b = $('#errorBanner');
+    b.textContent = ''; b.classList.remove('show');
+  }
+
+  // ====== UI RENDER ======
+  function renderCards() {
+    const frag = document.createDocumentFragment();
+    for (const s of PLAYLIST) {
+      const audio = el('audio', { controls: '', preload: 'none' });
+      // Add multiple sources for robust loading
+      for (const src of s.sources) {
+        audio.appendChild(el('source', { src, type: 'audio/mpeg' }));
+      }
+      audio.addEventListener('error', () => {
+        const note = document.getElementById(`err-${s.id}`);
+        if (note) note.textContent = 'Audio failed to load. If this persists, try the CDN source by opening the song link directly.';
+      }, { once:true });
+
+      const btn = el('button', { class: 'vote', onClick: () => vote(s.id), 'aria-label': `Vote for ${s.title}` }, ['Vote']);
+      const count = el('span', { class: 'count', id: `count-${s.id}` }, ['0 votes']);
+
+      const card = el('article', { class: 'card', 'aria-labelledby': `h-${s.id}` }, [
+        el('div', { class: 'title', id: `h-${s.id}` }, [s.title]),
+        audio,
+        el('div', { class: 'voteRow' }, [btn, count]),
+        el('div', { id: `err-${s.id}`, class: 'muted' })
+      ]);
+      frag.appendChild(card);
+    }
+    $('#cards').innerHTML = '';
+    $('#cards').appendChild(frag);
+  }
+
+  function renderTotals() {
+    const container = $('#totals');
+    container.innerHTML = '';
+    const totalVotes = Array.from(state.counts.values()).reduce((a,b)=>a+b,0);
+
+    for (const s of PLAYLIST) {
+      const n = state.counts.get(s.id) || 0;
+      const pct = totalVotes ? Math.round((n/totalVotes)*100) : 0;
+      const row = el('div', { style: 'margin:10px 0' }, [
+        el('div', { style: 'display:flex; justify-content:space-between; align-items:center' }, [
+          el('strong', {}, [s.title]),
+          el('span', {}, [`${n} vote${n!==1?'s':''} (${pct}%)`])
+        ]),
+        (()=>{
+          const m = el('div', { class: 'meter', role: 'img', 'aria-label': `${s.title} ${pct}%` }, [
+            el('div', { style: `width:${pct}%` })
+          ]);
+          return m;
+        })()
+      ]);
+      container.appendChild(row);
+    }
+  }
+
+  function updateCountsUI(){
+    for (const s of PLAYLIST) {
+      const n = state.counts.get(s.id) || 0;
+      const elCount = document.getElementById(`count-${s.id}`);
+      if (elCount) elCount.textContent = `${n} vote${n!==1?'s':''}`;
+    }
+    renderTotals();
+  }
+
+  // ====== SUPABASE ======
+  async function initSupabase(){
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    await fetchCounts();
+    // Start polling instead of realtime
+    state.timer = setInterval(fetchCounts, POLL_INTERVAL_MS);
+    $('#btnRefresh').addEventListener('click', () => fetchCounts(true));
+  }
+
+  async function fetchCounts(manual=false){
+    try {
+      clearError();
+      const { data, error } = await supabaseClient.from('votes').select('song_id');
+      if (error) throw error;
+      // Reset counts and aggregate client-side
+      state.counts = new Map(PLAYLIST.map(s => [s.id, 0]));
+      for (const row of (data||[])) {
+        const sid = row.song_id; if (!state.counts.has(sid)) continue; // ignore unknown ids
+        state.counts.set(sid, (state.counts.get(sid) || 0) + 1);
+      }
+      updateCountsUI();
+      if (manual) flash('#btnRefresh');
+    } catch (e) {
+      console.error(e);
+      showError('Could not load vote totals from Supabase. The page will keep trying automatically.');
+    }
+  }
+
+  async function vote(songId){
+    try {
+      const { error } = await supabaseClient.from('votes').insert({ song_id: songId });
+      if (error) throw error;
+      // Optimistic UI
+      state.counts.set(songId, (state.counts.get(songId) || 0) + 1);
+      updateCountsUI();
+    } catch (e) {
+      console.error(e);
+      showError('Could not record your vote. Please try again.');
+    }
+  }
+
+  function flash(sel){
+    const n = $(sel); if(!n) return;
+    n.style.transform = 'scale(0.98)';
+    setTimeout(()=>{ n.style.transform = 'scale(1)'; }, 120);
+  }
+
+  // ====== BOOT ======
+  renderCards();
+  initSupabase();
+</script>
+
+<!--
+Supabase SQL to run once (Database > SQL editor)
+
+create table if not exists public.votes (
+  id uuid primary key default gen_random_uuid(),
+  song_id text not null,
+  created_at timestamptz not null default now()
+);
+
+alter table public.votes enable row level security;
+
+create policy "anyone can insert votes"
+  on public.votes for insert to anon with check (true);
+
+create policy "anyone can read votes"
+  on public.votes for select to anon using (true);
+
+-- Optional: if your votes ever get huge and you want efficient counts without reading rows,
+-- create a view and select from it instead of client-side aggregation.
+-- create view public.vote_counts as select song_id, count(*) as n from public.votes group by song_id;
+-- Then change fetchCounts to: supabase.from('vote_counts').select('*')
+-- and map row.n into state.counts.
+-- (No realtime required; this page polls every few seconds.)
+-- If you later enable Realtime, you can switch back easily.
+--
+-- Audio tip: If relative paths act up on Pages, the CDN fallback sources already included
+-- (https://cdn.jsdelivr.net/gh/gnoggin/somerset@main/audio/...).
+-- Ensure filenames & case match exactly.
+--  -->
+
+</body>
+</html>
